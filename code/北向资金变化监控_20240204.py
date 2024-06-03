@@ -1,76 +1,83 @@
+import pandas as pd
+import requests
+import json
 import tushare as ts
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
-import datetime
-# 此脚本监控北向资金
 import akshare as ak
 
 
-class Getdata():
-    def __init__(self,dec,jan,today):
-        # 时间
-        self.dec = dec
-        self.jan= jan
-        self.today = today
-        self.pro  = ts.pro_api('your_token')
-        #初始化行业匹配表
-        self.hyppb =pd.read_excel('行业匹配表.xlsx')
 
-    # 获取北向数据akshare
-    def northfound(self, dec,jan,today):
-        #获取交易日历
-        df_date = self.pro.trade_cal(exchange='', start_date='20231201', end_date=today)
-        df_date =df_date.sort_values(by='cal_date')
-        df_date =df_date[df_date['cal_date']<=today]
-        df_date =df_date[df_date['is_open']==1].tail(2)
-        #交易日历筛选排序
-        date_list =[dec,jan] + df_date['cal_date'].tolist()
-        print(date_list)
-        hyppb = self.hyppb
-        # vol 持股数量(股)
-        # ratio 持股占比（%），占已发行股份百分比
-        # 获取单日全部持股
-        for i in tqdm(date_list):
+
+class Getdata():
+    def __init__(self,date):
+        self.df = pd.read_excel('行业匹配表.xlsx')
+        self.date =date
+        self.pro = ts.pro_api('your_token')
+        self.dates_str =None
+
+
+    def northfound(self):
+        # 获取交易日历
+        df_date = self.pro.hk_tradecal(exchange='', start_date='20231001', end_date=self.date)
+        df_date = df_date.sort_values(by='cal_date')
+        df_date = df_date[df_date['cal_date'] <= self.date]
+        df_date = df_date[df_date['is_open'] == 1]
+        # 将 'cal_date' 列转换为 datetime 类型
+        df_date['cal_date'] = pd.to_datetime(df_date['cal_date'])
+        # 找到每个月的最后一天
+        last_day_of_month = df_date.resample('M', on='cal_date')['cal_date'].max().tolist()
+        dates_str = [date.strftime('%Y%m%d') for date in last_day_of_month]
+        self.dates_str =dates_str
+
+        merged_df = pd.DataFrame()
+
+        for i in tqdm(dates_str):
             print('获取{}日期数据'.format(i))
             try:
-                df = self.pro.hk_hold(trade_date=i)
-                df = df[['ts_code', 'vol','ratio']]
-                df['vol'] = round(df['vol'] / 10000, 2)
-                df.columns = ['证券代码', i + '持股数量(万股)', i + '持股占比(%)']
-                hyppb = pd.merge(hyppb, df, on='证券代码', how='left')
-            except:
+                if i ==self.date:
+                    df = self.pro.hk_hold(trade_date=i)
+                    df['vol'] = round(df['vol'] / 10000, 2)
+                    df = df[['ts_code', 'vol','ratio']]
+                    df.columns = ['证券代码', i + '持股数量(万股)',i + '持股占比(%)']
+                else:
+                    df=self.pro.hk_hold(trade_date=i)
+                    df['vol'] =round(df['vol'] /10000,2)
+                    df=df[['ts_code', 'vol']]
+                    # df = df[['股票代码', '持股数量']]
+                    df.columns = ['证券代码', i + '持股数量(万股)']
+                # df['证券代码'] = df['证券代码'].apply(lambda X: X[:6] + '.SH' if X[0] == "6" else X[:6] + '.SZ')
+                if not merged_df.empty:
+                    merged_df = pd.merge(merged_df, df, on='证券代码', how='outer')
+                else:
+                    merged_df = df.copy()
+            except Exception as e:
+                print(f'获取{dates_str}日期数据出错：{e}')
                 continue
-        return hyppb
+        # print('最终结果',merged_df)
+        return merged_df
 
 
-
-
-
+    def data_procss(self):
+        newdata = self.northfound()
+        final_data = pd.merge(self.df, newdata, on='证券代码', how='left')
+        final_data = final_data.sort_values(by=['一级行业', '二级行业', '三级行业', '证券代码'])
+        final_data = final_data.dropna()
+        final_data = final_data.drop_duplicates(subset=['证券代码'])
+        print(self.dates_str)
+        #取日月环比，3个月环比,半年环比
+        final_data['日月环比%'] = round((final_data[self.dates_str[-1]+'持股数量(万股)'] / final_data[self.dates_str[-2]+'持股数量(万股)']-1)*100, 2)
+        final_data['3个月环比%'] = round((final_data[self.dates_str[-2] + '持股数量(万股)'] / final_data[self.dates_str[-5] + '持股数量(万股)'] - 1) * 100, 2)
+        final_data['半年环比%'] = round((final_data[self.dates_str[-2] + '持股数量(万股)'] / final_data[self.dates_str[-7] + '持股数量(万股)'] - 1) * 100, 2)
+        final_data['小记'] =final_data['日月环比%']+final_data['3个月环比%']+final_data['半年环比%']
+        final_data = final_data.reset_index(drop=True)
+        return final_data
 
 if __name__ == '__main__':
-    dec='20231229'
-    jan='20240131'
-    #修改today的日期，其他不调整
-    yesterday='20240201'
-    today='20240202'
-    specified_date = datetime.datetime.strptime(today, '%Y%m%d')
 
-    data = Getdata(dec,jan,today)
-    northdate=data.northfound(dec,jan,today)
-    northdate['1月环比']= (northdate['20240131持股数量(万股)']-northdate['20231229持股数量(万股)'])/northdate['20231229持股数量(万股)']
-    northdate['1月环比']=round(northdate['1月环比'],2)
-    northdate['日月环比'] = (northdate[today+'持股数量(万股)'] - northdate['20240131持股数量(万股)']) / northdate[
-        '20240131持股数量(万股)']
-    northdate['日月环比'] = round(northdate['日月环比'], 2)
-    northdate['今日环比'] = (northdate[today + '持股数量(万股)'] - northdate[yesterday+'持股数量(万股)']) / northdate[
-        yesterday+'持股数量(万股)']
-    northdate['今日环比'] = round(northdate['今日环比'], 2)
-    print(northdate,northdate.columns)
-    northdate.to_excel(today + '_北向数据监控.xlsx', index=False)
-
-
-
-
-
-
+    #输入上一交易日date,自动提取出最后前6个月的时间点
+    date ='20240602'
+    data = Getdata(date)
+    final_data = data.data_procss()
+    print(final_data)
+    final_data.to_excel(date+'_全市场北向持仓量.xlsx',index=False)
